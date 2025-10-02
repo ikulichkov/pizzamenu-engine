@@ -1,10 +1,11 @@
-// Ядро движка. Пространство callback-данных: только "m:*", как в варианте 1. (безопасность)
+// src/engine.js
+// Ядро движка. Пространство callback-данных: только "m:*", как в варианте 1 (безопасность).
 // Команды: из 4 (+ /sort для админа, паритет с A из 2). /start сосуществует с чужим, см. ctx.state.handled.
 // TZ: Intl.* без luxon.
 
 import { createSabyClient } from './saby.js';
-import { nowTZMinutesSinceMidnight, slotLabel, toLocalPrestoDate, humanDateShort, isTodayInTZ } from './util-date.js';
-import { priceLabel, encId, decId, normalizePhone } from './shared.js';
+import { nowTZMinutesSinceMidnight, slotLabel } from './util-date.js';
+import { priceLabel, encId, decId } from './shared.js';
 
 const MENU_PREFIX = 'm:'; // всё, что не начинается с m:, — не наше и игнорим. (вариант 1)
 
@@ -17,6 +18,10 @@ const DEFAULTS = {
 
 /** @typedef {{ready:()=>Promise<boolean>, getAddresses:(userId:number,limit?:number)=>Promise<any[]>, saveAddress:(userId:number,full:string,json:any)=>Promise<void>, savePhone:(userId:number,phone:string,isPrimary?:boolean)=>Promise<void>, loadCart:(userId:number)=>Promise<any[]>, saveCart:(userId:number,items:any[])=>Promise<void>, loadAllMenuOrders:()=>Promise<Array<{parentId:string|null, orderedIds:string[], hiddenIds:string[]}>>, saveMenuOrder:(parentId:string|null, orderedIds:string[], hiddenIds:string[])=>Promise<void>}} Storage */
 
+/**
+ * Создает движок меню.
+ * @param {{saby:object,business?:object,shop?:object,storage:Storage,debug?:number}} params
+ */
 export async function createEngine({ saby, business, shop, storage, debug = 1 }) {
     const cfg = {
         business: { ...DEFAULTS.business, ...business },
@@ -34,7 +39,7 @@ export async function createEngine({ saby, business, shop, storage, debug = 1 })
     // Runtime кэш каталога/прайса/порядка
     let POINT_ID = null;
     let CATALOG = { byId: new Map(), parentById: new Map(), foldersByParent: new Map(), itemsByParent: new Map(), ROOT: '__root__' };
-    const CATEGORY_ORDER = new Map(); // parentId -> { order:string[], hidden:Set<string> }
+    const CATEGORY_ORDER = new Map(); // parentId -> { orderedIds:string[], hiddenIds:string[] }
     const STATE = new Map(); // chatId -> { cart, cartLoaded, sortMode?:boolean, currentPriceListId, currentPriceListName, catId?:string|null }
 
     const commands = [
@@ -67,10 +72,9 @@ export async function createEngine({ saby, business, shop, storage, debug = 1 })
     function applyOrderFor(parentId, ids) {
         const rec = CATEGORY_ORDER.get(parentId == null ? null : String(parentId));
         if (!rec) return ids.slice();
-        const hidden = new Set(rec.hiddenIds || rec.hidden || []);
+        const hidden = new Set(rec.hiddenIds || []);
         const order = Array.isArray(rec.orderedIds) ? rec.orderedIds.map(String) : [];
         const visible = ids.filter(x => !hidden.has(String(x)));
-        // Сначала то, что в order, затем остальные по исходному порядку
         const inOrder = order.filter(x => visible.includes(x));
         const rest = visible.filter(x => !inOrder.includes(x));
         return [...inOrder, ...rest];
@@ -84,14 +88,11 @@ export async function createEngine({ saby, business, shop, storage, debug = 1 })
             if (!POINT_ID) throw new Error('No Saby pointId');
         }
         const pl = await SABY.getPriceLists(POINT_ID);
-        // выбираем нужный прайс
         const picked = Array.isArray(pl?.records) ? pl.records.find(r => Number(r.id) === Number(cfg.saby.fixedPriceListId)) : null;
         const pid = picked?.id ?? cfg.saby.fixedPriceListId;
 
-        // тянем номенклатуру
         const all = await SABY.getNomenclature(POINT_ID, pid, 0, 1000);
 
-        // Индексация: максимально простая схема дерева из A
         const byId = new Map(); const parentById = new Map();
         const foldersByParent = new Map(); const itemsByParent = new Map();
         const ROOT = '__root__';
@@ -119,8 +120,7 @@ export async function createEngine({ saby, business, shop, storage, debug = 1 })
         for (const rec of rows) {
             CATEGORY_ORDER.set(rec.parentId == null ? null : String(rec.parentId), {
                 orderedIds: (rec.orderedIds || []).map(String),
-                hidden: new Set((rec.hiddenIds || []).map(String)),
-                hiddenIds: (rec.hiddenIds || []).map(String)
+                hiddenIds:  (rec.hiddenIds  || []).map(String)
             });
         }
         log('catalog refreshed, items:', byId.size);
@@ -172,8 +172,8 @@ export async function createEngine({ saby, business, shop, storage, debug = 1 })
             return sendCategory(ctx, folders[0], 0);
         }
 
-        const pageSize =  cfg.ui.pageSize;
-        const start     =  page * pageSize;
+        const pageSize = cfg.ui.pageSize;
+        const start = page * pageSize;
         const itemsPage = itemsAll.slice(start, start + pageSize);
 
         const rows = [];
@@ -268,7 +268,7 @@ export async function createEngine({ saby, business, shop, storage, debug = 1 })
         await ctx.reply(st.sortMode ? 'Режим сортировки: ВКЛ' : 'Режим сортировки: ВЫКЛ');
     }
 
-    // ========= delivery flow (минимально, без экстрима) =========
+    // ========= delivery flow (минимально) =========
     async function startDelivery(ctx) {
         await ctx.reply('Введите адрес одной строкой (улица дом, квартира):');
         const st = getState(ctx.chat.id);
@@ -296,7 +296,6 @@ export async function createEngine({ saby, business, shop, storage, debug = 1 })
             await storage.saveAddress(ctx.from.id, best.fullAddress || text, best);
             st.flow = 'slot';
             await ctx.reply('Адрес сохранен. Выберите слот доставки:');
-            // календарь: тут просто показываем ближайшие 6 слотов сегодняшних
             const minutes = nowTZMinutesSinceMidnight(cfg.business.timeZone);
             const startIdx = Math.max(cfg.business.slotOpenIdx, Math.floor((minutes - 30) / 30));
             const endIdx = cfg.business.slotCloseIdx;
@@ -347,10 +346,9 @@ export async function createEngine({ saby, business, shop, storage, debug = 1 })
 
     // ========= публичный API =========
     async function attach(bot) {
-        // Инициализация каталога при первом запуске
         await refreshCatalog().catch(e => log('catalog init failed', e?.message || e));
 
-        // наш «второй /start» — не перехватывает чужой, только дополняет (вариант 4 + уважение к ctx.state.handled)
+        // наш «второй /start» — не перехватывает чужой, только дополняет
         bot.start(async (ctx, next) => {
             try {
                 if (!ctx.state?.handled) await sendStartUi(ctx);
@@ -363,7 +361,6 @@ export async function createEngine({ saby, business, shop, storage, debug = 1 })
         bot.command('delivery', ctx => startDelivery(ctx));
         if (cfg.business.adminId) bot.command('sort', ctx => toggleSortMode(ctx));
 
-        // текстовые
         bot.on('text', onText);
 
         // только наши callback-и, начинающиеся с m:
@@ -374,6 +371,6 @@ export async function createEngine({ saby, business, shop, storage, debug = 1 })
         attach,
         sendStartUi,
         commands,
-        __getStartPayload, // для совместимости (getStartPayload)
+        __getStartPayload // для совместимости (getStartPayload)
     };
 }
