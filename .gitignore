@@ -1,0 +1,19 @@
+# deps
+node_modules/
+package-lock.json
+pnpm-lock.yaml
+yarn.lock
+
+# builds
+dist/
+build/
+coverage/
+
+# env
+.env
+.env.*
+.DS_Store
+
+# ide
+.idea/
+.vscode/
