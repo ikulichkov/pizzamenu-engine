@@ -156,6 +156,7 @@ export async function createEngine({ saby, business, shop, storage, debug = 1 })
 
     async function sendStartUi(ctx) {
         const { text, extra } = await __getStartPayload(ctx);
+        console.log(`text, extra`, text, extra)
         await ctx.reply(text, extra);
     }
 
