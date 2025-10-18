@@ -1,52 +1,66 @@
-// Единственный экспорт: фабрика движка. База — вариант 4, с алиасами из 2/3.
-// Источник идей API: 4.md (attach/sendStartUi/commands), совместимость: 2.md (register/startContent) и 3.md (getStartPayload).
 import { createEngine } from './engine.js';
 
 /**
- * @param {Object} config
- * @param {Object} config.saby {clientId, secretKey, serviceKey, authUrl?, apiBase?, fixedPriceListId?, fixedPriceListName?}
- * @param {Object} config.business { timeZone?, slotOpenIdx?, slotCloseIdx?, adminId? }
- * @param {Object} config.shop { shopURL?, successURL?, errorURL? }
- * @param {Object} [config.storage]  Пользовательский адаптер хранилища (см. storage/types.js)
- * @param {Object} [config.mongo]    Если хочешь встроенный mongoose-адаптер: { url, dbName, connect?: boolean }
- * @param {number} [config.debug=1]
- * @returns {Promise<{
- *   attach: (bot: import('telegraf').Telegraf) => Promise<void>,
- *   register: (bot: import('telegraf').Telegraf) => Promise<void>,
- *   sendStartUi: (ctx: any) => Promise<void>,
- *   getStartPayload: (chatIdOrCtx: number|any) => Promise<{text:string, extra?:object}>,
- *   commands: Array<{command:string, description:string}>
- * }>}
+ * Attach the Saby/Presto menu listener to a Telegraf bot.
+ *
+ * This function reads configuration parameters from environment variables. It accepts a storage adapter
+ * that implements the necessary persistence operations (addresses, phone numbers, cart contents and
+ * menu order). Once attached, it registers its own handlers on the provided bot instance and returns
+ * the list of commands it exposes (e.g. `/menu`, `/cart`, `/delivery`, `/sort` for admins).
+ *
+ * @param {import('telegraf').Telegraf} bot The Telegraf bot instance.
+ * @param {Object} storage An object implementing the storage interface (ready, getAddresses, saveAddress, savePhone, loadCart, saveCart, loadAllMenuOrders, saveMenuOrder).
+ * @param {Object} [options] Reserved for future use.
+ * @returns {Promise<Array<{command: string, description: string}>>} Commands registered by the menu.
  */
-export default async function createMenuEngine(config = {}) {
-    const { saby, business = {}, shop = {}, storage, mongo, debug = 1 } = config;
+export default async function attachMenu(bot, storage = {}, options = {}) {
+    // Build the Saby configuration from process.env; fall back to sensible defaults where appropriate.
+    const saby = {
+        clientId: process.env.SABY_CLIENT_ID,
+        secretKey: process.env.SABY_SECRET_KEY,
+        serviceKey: process.env.SABY_SERVICE_KEY,
+        authUrl: process.env.SABY_AUTH_URL || 'https://online.sbis.ru/oauth/service/',
+        apiBase: process.env.SABY_API_BASE || 'https://api.sbis.ru',
+        fixedPriceListId: Number(process.env.SABY_PRICE_LIST_ID) || 64,
+        fixedPriceListName: process.env.SABY_PRICE_LIST_NAME || 'Меню'
+    };
 
-    let storageImpl = storage || null;
+    const business = {
+        timeZone: process.env.BUSINESS_TZ || 'Asia/Vladivostok',
+        slotOpenIdx: Number(process.env.SLOT_OPEN_IDX) || 20,
+        slotCloseIdx: Number(process.env.SLOT_CLOSE_IDX) || 42,
+        adminId: Number(process.env.ADMIN_ID) || 0
+    };
 
-    if (!storageImpl && mongo?.url) {
-        // Динамически подгружаем mongoose-адаптер (вариант 4), НО коннект — только если connect === true
-        const { createMongooseAdapter } = await import('./storage/mongoose.js');
-        storageImpl = await createMongooseAdapter({
-            mongoUrl: mongo.url,
-            dbName: mongo.dbName || 'pizza25',
-            connect: Boolean(mongo.connect),
-            debug
-        });
+    const shop = {
+        shopURL: process.env.SHOP_URL || 'https://pizza25.ru',
+        successURL: process.env.SHOP_SUCCESS_URL || 'https://pizza25.ru/pay/success',
+        errorURL: process.env.SHOP_ERROR_URL || 'https://pizza25.ru/pay/error'
+    };
+
+    // Basic validation
+    if (!saby.clientId || !saby.secretKey || !saby.serviceKey) {
+        throw new Error('[menu listener] Missing Saby credentials: SABY_CLIENT_ID, SABY_SECRET_KEY, SABY_SERVICE_KEY');
+    }
+    if (!storage || typeof storage !== 'object') {
+        throw new Error('[menu listener] A valid storage adapter must be provided');
     }
 
-    if (!saby?.clientId || !saby?.secretKey || !saby?.serviceKey) {
-        throw new Error('[menu6] saby credentials are required (clientId, secretKey, serviceKey)');
-    }
-    if (!storageImpl) {
-        throw new Error('[menu6] storage adapter is required (custom storage or mongo.url with connect flag)');
-    }
+    // Initialise the engine with the provided configuration and storage. The debug flag can be tuned via env if needed.
+    const engine = await createEngine({
+        saby,
+        business,
+        shop,
+        storage,
+        debug: process.env.MENU_DEBUG ? Number(process.env.MENU_DEBUG) : 1
+    });
 
-    const engine = await createEngine({ saby, business, shop, storage: storageImpl, debug });
+    // Attach the engine's handlers to the bot
+    await engine.attach(bot);
 
-    // Совместимые алиасы под варианты 2/3:
-    engine.register = engine.attach;                   // 2.md register(bot)
-    engine.getStartPayload = engine.__getStartPayload; // 3.md getStartPayload(...)
-    return engine;
+    // Return the commands array so the host application can merge it with its own commands
+    return Array.isArray(engine.commands) ? engine.commands : [];
 }
 
-export { default as createMenuEngine } from './index.js';
+// Re-export createEngine for advanced use cases where consumers need direct access to the engine.
+export { createEngine } from './engine.js';
