@@ -22,5 +22,8 @@
   "dependencies": {
     "luxon": "^3.7.2",
     "mongoose": "^8.19.0"
+  },
+  "devDependencies": {
+    "@ikulichkov/fn-extractor": "^1.0.10"
   }
 }

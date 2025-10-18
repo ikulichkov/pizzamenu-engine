@@ -91,21 +91,36 @@ export async function createEngine({ saby, business, shop, storage, debug = 1 })
         // тянем номенклатуру
         const all = await SABY.getNomenclature(POINT_ID, pid, 0, 1000);
 
-        // Индексация: максимально простая схема дерева из A
+        // Индексация: дерево
         const byId = new Map(); const parentById = new Map();
         const foldersByParent = new Map(); const itemsByParent = new Map();
         const ROOT = '__root__';
 
-        const items = Array.isArray(all?.items) ? all.items : Array.isArray(all?.records) ? all.records : [];
-        for (const row of items) {
+        const raw = Array.isArray(all?.items) ? all.items
+            : Array.isArray(all?.records) ? all.records
+                : [];
+
+        // 1) Сначала подготовим список только опубликованных
+        //    isPublished === false -> скрываем (и папки, и товары)
+        const rows = raw.filter(row => row?.isPublished !== false);
+
+        // 2) Проход: индексация
+        for (const row of rows) {
             const id = String(row.id);
             const parentId = row.parentId == null ? ROOT : String(row.parentId);
             const folder = !!row.group || !!row.folder;
             const cost = Number(row.price || row.cost || 0);
 
-            byId.set(id, { id, name: String(row.name || row.title || 'Без названия'), folder, cost });
+            // узел
+            byId.set(id, {
+                id,
+                name: String(row.name || row.title || 'Без названия'),
+                folder,
+                cost
+            });
             parentById.set(id, parentId);
 
+            // распределение по корзинам
             const map = folder ? foldersByParent : itemsByParent;
             if (!map.has(parentId)) map.set(parentId, []);
             map.get(parentId).push(id);
@@ -114,9 +129,9 @@ export async function createEngine({ saby, business, shop, storage, debug = 1 })
         CATALOG = { byId, parentById, foldersByParent, itemsByParent, ROOT };
 
         // порядок/скрытие из БД
-        const rows = await storage.loadAllMenuOrders().catch(() => []);
+        const rowsOrder = await storage.loadAllMenuOrders().catch(() => []);
         CATEGORY_ORDER.clear();
-        for (const rec of rows) {
+        for (const rec of rowsOrder) {
             CATEGORY_ORDER.set(rec.parentId == null ? null : String(rec.parentId), {
                 orderedIds: (rec.orderedIds || []).map(String),
                 hidden: new Set((rec.hiddenIds || []).map(String)),
